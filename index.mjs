@@ -4,6 +4,8 @@ import {XMLParser}  from 'fast-xml-parser';
 import dayjs from 'dayjs';
 import {setTimeout} from 'timers/promises';
 import fs from 'fs';
+import path from 'path';
+import ffmpeg from 'fluent-ffmpeg'
 
 const DATE_TIME_FORMAT = 'YYYYMMDDhhmmss';
 const DATE_FORMAT = 'YYYYMMDD';
@@ -11,7 +13,7 @@ const DATE_FORMAT = 'YYYYMMDD';
 // 一つのファイルの秒数
 const AUDIO_FILE_SECONDS = 5;
 
-const DOWNLOAD_DIR = './tmp';
+const DOWNLOAD_DIR = 'tmp';
 
 const getAuthenticatedHeaders = async () => {
   const authKey = "bcd151073c03b352e1ef2fd66c32209da9ca0afa";
@@ -117,6 +119,10 @@ const getMasterPlayList = async (stationId, startAt, endAt, seek = undefined) =>
 }
 
 const download = async (url, headers, fileName) => {
+  if(!fs.existsSync(DOWNLOAD_DIR)) {
+    fs.mkdirSync(DOWNLOAD_DIR)
+  }
+
   const arrayBuffer = await fetch(url, {
     method: 'GET',
     headers
@@ -193,11 +199,6 @@ const downloadAudioListParallel = async (stationId, startAt, endAt, downloadRate
     dateTime = dateTime.add(seekIntervalMinutes, 'minute');
     const seek = dateTime.format(DATE_TIME_FORMAT);
     seekList.push(seek);
-
-    // DEBUG中 11回でうちきっている
-    if(seekList.length > 11) {
-      break;
-    }
   }
   seekList.push(endAt);
 
@@ -213,6 +214,7 @@ const downloadAudioListParallel = async (stationId, startAt, endAt, downloadRate
     return retList;
   }, []);
 
+  console.log(`wait ${partitionedSeekList.length} minutes.`)
   for(let list of partitionedSeekList) {
     console.log(`Audio File downloading. Period: ${list[0] ?? startAt} - ${list[list.length - 1]}`)
     const audioUrlListPromise = list.map(async seek => {
@@ -225,12 +227,24 @@ const downloadAudioListParallel = async (stationId, startAt, endAt, downloadRate
 
 }
 
+const mergeAudioFile = async (fileDirPath, outputFileName) => {
+
+  const fileList = fs.readdirSync(fileDirPath)
+  const fileText = fileList.map(file => `file '${file}'`).join('\n');
+  const listFileName = `${fileDirPath}/list.txt`;
+  fs.writeFileSync(listFileName, fileText);
+
+  ffmpeg()
+    .input(listFileName)
+    .inputOptions(['-f concat', '-safe 0'])
+    .outputOptions('-c copy')
+    .output(outputFileName)
+    .run();
+
+}
+
 const main = async (url) => {
-
-  if(!fs.existsSync(DOWNLOAD_DIR)) {
-    fs.mkdirSync(DOWNLOAD_DIR);
-  }
-
+  
   const parseResult = parseProgramUrl(url);
   if(parseResult == null) {
     // TODO log
@@ -246,14 +260,26 @@ const main = async (url) => {
   }
   console.log(`program found. ${program.title} (${program.startAt} - ${program.endAt})`);
 
+  // ダウンロード用フォルダ用意
+  if(fs.existsSync(DOWNLOAD_DIR)) {
+    fs.rmSync(DOWNLOAD_DIR, {force: true, recursive: true})
+  }
+  fs.mkdirSync(DOWNLOAD_DIR);
+
   console.log('Audio File downloading.');
   await downloadAudioListParallel(program.stationId, program.startAt, program.endAt);
   console.log('All Audio File downloaded.');
 
-  // TODO ダウンロードした音声ファイルを結合させる
+  // TODO とりあえずm4a固定にしたけど、ffmpegで使える拡張子に対応させる
+  // ファイル名
+  const startDateStr = dayjs(program.startAt, DATE_TIME_FORMAT).format('YYYY年MM月DD日')
+  const outputFileName = `${program.title}_${startDateStr}.m4a`
+
+  // ダウンロードした音声ファイルを結合させる
+  mergeAudioFile(DOWNLOAD_DIR, outputFileName);
+  console.log(`complete! ${path.resolve(outputFileName)}`);
 
 }
-
 // radikoの再生画面のURL(https://radiko.jp/#!/ts/STATION_ID/YYYYMMDDhhmmss のような)
 const programUrl = process.argv[2] // TODO 決め打ちなので、修正する
 main(programUrl);
