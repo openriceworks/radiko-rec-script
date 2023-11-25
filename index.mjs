@@ -15,7 +15,7 @@ const AUDIO_FILE_SECONDS = 5;
 
 const DOWNLOAD_DIR = 'tmp';
 
-const getAuthenticatedHeaders = async () => {
+const authenticate = async () => {
   const authKey = "bcd151073c03b352e1ef2fd66c32209da9ca0afa";
 
   const headers =  {
@@ -40,12 +40,17 @@ const getAuthenticatedHeaders = async () => {
 
   headers['x-radiko-authtoken'] = authHeaders.get('x-radiko-authtoken')
   headers['x-radiko-partialkey'] = partialkey
-  const res2 = await fetch('https://radiko.jp/v2/api/auth2', {
+  const areaText = await fetch('https://radiko.jp/v2/api/auth2', {
     method: 'GET',
     headers
-  })
+  }).then(res2 => res2.text());
 
-  return headers
+  const [areaId, ...rest] = areaText.split(',')
+
+  return {
+    headers,
+    areaId
+  }
 }
 
 const parseProgramUrl = (url) => {
@@ -64,7 +69,7 @@ const parseProgramUrl = (url) => {
   }
 }
 
-const getProgramInfo = async (startAt, stationId, headers) => {
+const getProgramInfo = async (startAt, stationId, headers, areaId) => {
 
   const startDate = dayjs(startAt, DATE_TIME_FORMAT)
   // 取得する番組表の日付(番組表は5時区切りになっているので、開始時刻の五時間前の日付の番組表を取ると番組の情報がある)
@@ -72,7 +77,7 @@ const getProgramInfo = async (startAt, stationId, headers) => {
   const programDateStr = programDate.format(DATE_FORMAT)
 
   // 番組表を取得
-  const programList = await fetch(`https://radiko.jp/v3/program/date/${programDateStr}/JP13.xml`, {
+  const programList = await fetch(`https://radiko.jp/v3/program/date/${programDateStr}/${areaId}.xml`, {
     method: 'GET',
     headers
   })
@@ -151,7 +156,7 @@ const downloadAudioList = async (stationId, startAt, endAt, maxCount = undefined
     maxCount = totalSeconds / AUDIO_FILE_SECONDS;
   }
 
-  const headers = await getAuthenticatedHeaders();
+  const { headers }= await authenticate();
   const playListUrl = await getMasterPlayList(stationId, startAt, endAt, seek);
   // m3u8ファイルが取れるので解析
   const m3u8Text = await fetch(playListUrl, {
@@ -251,8 +256,8 @@ const main = async (url) => {
     return null;
   }
 
-  const headers = await getAuthenticatedHeaders();
-  const program = await getProgramInfo(parseResult.startAt, parseResult.stationId, headers);
+  const {headers, areaId} = await authenticate();
+  const program = await getProgramInfo(parseResult.startAt, parseResult.stationId, headers, areaId);
 
   if(program == null) {
     console.log(`program not found. ${url}`);
