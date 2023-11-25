@@ -15,6 +15,10 @@ const AUDIO_FILE_SECONDS = 5;
 
 const DOWNLOAD_DIR = 'tmp';
 
+/**
+ * radikoの認証処理を行う
+ * @returns 認証情報の入ったリクエストヘッダーと地方のID
+ */
 const authenticate = async () => {
   const authKey = "bcd151073c03b352e1ef2fd66c32209da9ca0afa";
 
@@ -30,7 +34,13 @@ const authenticate = async () => {
   const res = await fetch('https://radiko.jp/v2/api/auth1', {
     method: 'GET',
     headers
-  }).catch(console.error)
+  }).catch((error) => {
+    console.error(error)
+    return null;
+  });
+  if(res == null) {
+    throw new Error('authenticate failed!');
+  }
 
   // PartialKey生成
   const authHeaders = res.headers;
@@ -43,8 +53,15 @@ const authenticate = async () => {
   const areaText = await fetch('https://radiko.jp/v2/api/auth2', {
     method: 'GET',
     headers
-  }).then(res2 => res2.text());
+  }).then(res2 => res2.text()).catch((error) => {
+    console.error(error)
+    return null;
+  });
+  if(areaText == null) {
+    throw new Error('authenticate failed!');
+  }
 
+  // areaIdのみ取り出す(areaTextは'areaId,文字列,文字列'のようなフォーマットになっている)
   const [areaId, ...rest] = areaText.split(',')
 
   return {
@@ -53,6 +70,11 @@ const authenticate = async () => {
   }
 }
 
+/**
+ * radikoの再生画面のURLをパースして、番組の情報を取得
+ * @param {*} url 
+ * @returns 
+ */
 const parseProgramUrl = (url) => {
 
   // radikoの再生画面のURL(https://radiko.jp/#!/ts/STATION_ID/YYYYMMDDhhmmss のような)
@@ -69,6 +91,14 @@ const parseProgramUrl = (url) => {
   }
 }
 
+/**
+ * 音声ファイルのダウンロードに必要な番組の情報を取得する
+ * @param {*} startAt 
+ * @param {*} stationId 
+ * @param {*} headers 
+ * @param {*} areaId 
+ * @returns 
+ */
 const getProgramInfo = async (startAt, stationId, headers, areaId) => {
 
   const startDate = dayjs(startAt, DATE_TIME_FORMAT)
@@ -104,6 +134,14 @@ const getProgramInfo = async (startAt, stationId, headers, areaId) => {
   };
 }
 
+/**
+ * m3u8ファイルをダウンロードするファイルを取得する
+ * @param {*} stationId 
+ * @param {*} startAt 
+ * @param {*} endAt 
+ * @param {*} seek 
+ * @returns 
+ */
 const getMasterPlayList = async (stationId, startAt, endAt, seek = undefined) => {
 
   const params = new URLSearchParams();
@@ -123,9 +161,22 @@ const getMasterPlayList = async (stationId, startAt, endAt, seek = undefined) =>
   return `https://tf-f-rpaa-radiko.smartstream.ne.jp/tf/playlist.m3u8?${params.toString()}`
 }
 
+/**
+ * ファイルのダウンロード
+ * @param {*} url 
+ * @param {*} headers 
+ * @param {*} fileName 
+ * @returns 
+ */
 const download = async (url, headers, fileName) => {
   if(!fs.existsSync(DOWNLOAD_DIR)) {
     fs.mkdirSync(DOWNLOAD_DIR)
+  }
+
+  const downloadPath = `${DOWNLOAD_DIR}/${fileName}`;
+  if(fs.existsSync(downloadPath)) {
+    // すでにあればダウンロードしない
+    return ;
   }
 
   const arrayBuffer = await fetch(url, {
@@ -135,17 +186,24 @@ const download = async (url, headers, fileName) => {
     console.error(error);
     return null;
   });
-  const buffer = Buffer.from(arrayBuffer);
-  const downloadPath = `${DOWNLOAD_DIR}/${fileName}`;
-  if(fs.existsSync(downloadPath)) {
-    // すでにあればダウンロードしない
-    return ;
+  if(arrayBuffer == null) {
+    throw new Error('download failed!');
   }
 
+  const buffer = Buffer.from(arrayBuffer);
   fs.writeFileSync(downloadPath, buffer);
 
 }
 
+/**
+ * 番組の音声ファイルをダウンロードする
+ * NOTE: 公式サイトのブラウザで使われているAPIを使っているが、他のサンプルコードを見た感じにもう少し簡単に扱えるAPIがありそう
+ * @param {*} stationId 
+ * @param {*} startAt 
+ * @param {*} endAt 
+ * @param {*} maxCount 
+ * @param {*} seek 
+ */
 const downloadAudioList = async (stationId, startAt, endAt, maxCount = undefined, seek = undefined) => {
 
   if(maxCount == null) {
@@ -156,20 +214,30 @@ const downloadAudioList = async (stationId, startAt, endAt, maxCount = undefined
     maxCount = totalSeconds / AUDIO_FILE_SECONDS;
   }
 
+  // m3u8ファイルを取得する
+  // ただし、m3u8ファイルには「音声ファイルのリンク」はなく、「音声ファイルのリンクへのリンク」が記述されている。
   const { headers }= await authenticate();
   const playListUrl = await getMasterPlayList(stationId, startAt, endAt, seek);
   // m3u8ファイルが取れるので解析
   const m3u8Text = await fetch(playListUrl, {
     method: 'GET',
     headers
-  }).then(res => res.text())  
+  }).then(res => res.text()).catch(error => {
+    console.error(error)
+    return null;
+  })
+  if(m3u8Text == null) {
+    throw new Error(`failed get playlist url. ${playListUrl}`);
+  }
+
   const parser = new m3u8Parser.Parser();
   parser.push(m3u8Text.split('\r\n'));
   parser.end();
-  // playListの元となるuri
+  // 音声ファイルのリンクへのリンク
   const playListUri = parser.manifest.playlists[0].uri;
 
   for(let i = 0; i < maxCount; i++) {
+    // 「音声ファイルのリンクへのリンク」に現在時刻(unixtime)のクエリをつけることで、その時間に再生されているであろう音声ファイルへのリンクが取れる
     const playListUrl = `${playListUri}&_=${dayjs().valueOf()}`;
     const m3u8Text2 = await fetch(playListUrl, {
       method: 'GET',
@@ -188,6 +256,13 @@ const downloadAudioList = async (stationId, startAt, endAt, maxCount = undefined
   }
 }
 
+/**
+ * 番組の音声ファイルをダウンロードする（並列実行版）
+ * @param {*} stationId 
+ * @param {*} startAt 
+ * @param {*} endAt 
+ * @param {*} downloadRate 
+ */
 const downloadAudioListParallel = async (stationId, startAt, endAt, downloadRate = 10) => {
 
   // 同じ番組を複数再生するように見せかけることで、実時間よりも早くダウンロードする
@@ -232,6 +307,11 @@ const downloadAudioListParallel = async (stationId, startAt, endAt, downloadRate
 
 }
 
+/**
+ * 複数の音声ファイルを一つにまとめる
+ * @param {*} fileDirPath 
+ * @param {*} outputFileName 
+ */
 const mergeAudioFile = async (fileDirPath, outputFileName) => {
 
   const fileList = fs.readdirSync(fileDirPath)
@@ -252,7 +332,7 @@ const main = async (url) => {
   
   const parseResult = parseProgramUrl(url);
   if(parseResult == null) {
-    // TODO log
+    console.log(`unrecognized url. ${url}`)
     return null;
   }
 
